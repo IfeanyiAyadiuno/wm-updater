@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Data we don't want in git
+*.accdb
+*.mdb
+*.laccdb
+*.xlsx
+*.xls
+*.csv
