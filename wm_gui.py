@@ -39,8 +39,10 @@ DROPDOWN_FIELDS = [
 
 # Which fields are free-text/entry (kept simple)
 ENTRY_FIELDS = [
-    "Well Name", "Inital Flow Date", "ES Well Name", "Lateral Length", "Value Navigator UWI", "Composite name"
+    "Well Name", "Inital Flow Date", "ES Well Name", "Lateral Length", "Value Navigator UWI",
 ]
+
+EDITABLE_FIELDS = ENTRY_FIELDS + DROPDOWN_FIELDS
 
 # =========================
 # DATA ACCESS LAYER
@@ -147,25 +149,64 @@ def update_record(conn, table_name: str, rec_id: int, payload: dict):
     cur = conn.cursor()
     cur.execute(sql, params)
 
-
+def compose_name(well: str | None, layer: str | None, tech: str | None) -> str | None:
+    w = (well or "").strip()
+    l = (layer or "").strip()
+    t = (tech or "").strip()
+    if not (w and l and t):
+        return None
+    return f"{w} - {l} - {t}"
 # =========================
 # GUI
 # =========================
 
-class ScrollFrame(ttk.Frame):
+class XYScrollFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
-        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
-        self.viewPort = ttk.Frame(canvas)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
 
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        canvas.create_window((0, 0), window=self.viewPort, anchor="nw")
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self.viewPort = ttk.Frame(self.canvas)
 
-        self.viewPort.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        self.viewPort.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+
+        self.canvas.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+
+        # Layout
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vsb.grid(row=0, column=1, sticky="ns")
+        self.hsb.grid(row=1, column=0, sticky="ew")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Create window for content
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.viewPort, anchor="nw")
+
+        # Update scrollregion when content size changes
+        def _on_configure(_):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.viewPort.bind("<Configure>", _on_configure)
+
+        # Keep inner frame width in sync when canvas is resized (so vertical scroll works nicely)
+        def _on_canvas_configure(event):
+            # comment next line if you want true free horizontal expansion without stretching
+            # self.canvas.itemconfigure(self.canvas_window, width=event.width)
+            pass
+        self.canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse wheel (vertical)
+        def _on_mousewheel(event):
+            # Windows/Mac
+            delta = int(-1*(event.delta/120))
+            self.canvas.yview_scroll(delta, "units")
+        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # Shift + wheel (horizontal)
+        def _on_shift_wheel(event):
+            delta = int(-1*(event.delta/120))
+            self.canvas.xview_scroll(delta, "units")
+        self.canvas.bind_all("<Shift-MouseWheel>", _on_shift_wheel)
+
 
 
 class App(tk.Tk):
@@ -193,16 +234,42 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
-        # Tab 1: Current Table
+        
+                # Tab 1: Current Wells
         self.tab_current = ttk.Frame(self.nb)
-        self.nb.add(self.tab_current, text="Current Table")
+        self.nb.add(self.tab_current, text="Current Wells")
 
-        self.tree = ttk.Treeview(self.tab_current, columns=TABLE_COLUMNS, show="headings")
-        for col in TABLE_COLUMNS:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=130, anchor="w")
-        self.tree.pack(fill="both", expand=True)
+        # --- wrapper for tree + scrollbars
+        tree_wrap = ttk.Frame(self.tab_current)
+        tree_wrap.pack(fill="both", expand=True)
 
+        # columns list gets set in reload_all; create an empty tree for now
+        self.tree = ttk.Treeview(tree_wrap, show="headings")
+
+        # scrollbars
+        ys = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        xs = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+
+        # place
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        tree_wrap.rowconfigure(0, weight=1)
+        tree_wrap.columnconfigure(0, weight=1)
+
+        # inline edit + checkbox toggles
+        self.tree.bind("<Button-1>", self.on_tree_click)           # toggle checkbox when clicking Select column
+        self.tree.bind("<Double-1>", self.on_tree_double_click)    # start inline edit on double-click
+
+        # footer for save action
+        current_footer = ttk.Frame(self.tab_current)
+        current_footer.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Button(current_footer, text="Save checked edits → Access", command=self.save_checked_edits).pack(side="right")# Tab 1: Current Wells
+        
+        
+        
+        
         # Tab 2: Add New
         self.tab_add = ttk.Frame(self.nb)
         self.nb.add(self.tab_add, text="Add New IDs")
@@ -211,7 +278,10 @@ class App(tk.Tk):
         head.pack(fill="x", padx=8, pady=6)
         ttk.Label(head, text="Select rows to insert. Well Name is optional for now; other fields via dropdown.").pack(side="left")
 
-        self.scroll = ScrollFrame(self.tab_add)
+        #self.scroll = XYScrollFrame(self.tab_add)
+        #self.scroll.pack(fill="both", expand=True, padx=8, pady=4)
+
+        self.scroll = XYScrollFrame(self.tab_add)
         self.scroll.pack(fill="both", expand=True, padx=8, pady=4)
 
         # Footer actions
@@ -241,16 +311,29 @@ class App(tk.Tk):
             messagebox.showerror("Load Error", f"Failed to load Access table:\n{e}")
             return
 
-        # populate current table Treeview
         self.tree.delete(*self.tree.get_children())
-        # align Treeview columns to available data
+
         cols_present = [c for c in TABLE_COLUMNS if c in self.df_current.columns]
-        self.tree.configure(columns=cols_present)
-        for c in cols_present:
+        self.columns_present = ["Select"] + cols_present
+        self.tree.configure(columns=self.columns_present)
+
+        for c in self.columns_present:
             self.tree.heading(c, text=c)
-        for _, row in self.df_current.iterrows():
-            values = [row.get(c, "") for c in cols_present]
-            self.tree.insert("", "end", values=values)
+            self.tree.column(
+                c,
+                width=180 if c != "Select" else 70,
+                anchor="w" if c != "Select" else "center",
+                stretch=False,
+            )
+
+        self._checked = set()
+        self._pending_edits = {}
+        self._cell_editor = None
+
+        for idx, row in self.df_current.iterrows():
+            iid = str(row["ID"]) if "ID" in row and pd.notna(row["ID"]) else str(idx)
+            values = ["☐"] + [row.get(c, "") for c in cols_present]
+            self.tree.insert("", "end", iid=iid, values=values)
 
         # dropdown options from existing data
         self.dropdown_options = get_unique_options(self.df_current)
@@ -266,61 +349,274 @@ class App(tk.Tk):
         self.count_label.config(text=f"Loaded {len(self.df_current)} existing rows • {len(self.new_ids)} pending IDs")
 
     def build_add_rows(self):
-        # clear prior widgets
+    
+    # wipe previous UI
         for child in list(self.scroll.viewPort.children.values()):
             child.destroy()
         self.new_widgets.clear()
 
-        # header row
-        header = [
-            "Select", "GasIDREC", "PressuresIDREC", *ENTRY_FIELDS, *DROPDOWN_FIELDS
-        ]
-        hdr = ttk.Frame(self.scroll.viewPort)
-        hdr.pack(fill="x", pady=(0, 4))
-        for i, t in enumerate(header):
-            ttk.Label(hdr, text=t, font=("Segoe UI", 9, "bold")).grid(row=0, column=i, sticky="w", padx=6)
+        # one shared container so headers + all rows use the same grid columns
+        table = ttk.Frame(self.scroll.viewPort)
+        table.pack(fill="both", expand=True, padx=8, pady=4)
 
-        # value rows
-        for idx, rec in enumerate(self.new_ids):
-            rowf = ttk.Frame(self.scroll.viewPort)
-            rowf.pack(fill="x", pady=2)
+        # column headers (add Composite name at the end)
+        headers = ["Select", "GasIDREC", "PressuresIDREC", *ENTRY_FIELDS, *DROPDOWN_FIELDS, "Composite name"]
 
+        # target min widths for each column
+        col_widths = (
+            [70, 160, 160] +                    # Select, GasIDREC, PressuresIDREC
+            [220] * len(ENTRY_FIELDS) +         # entry fields
+            [200] * len(DROPDOWN_FIELDS) +      # dropdown fields
+            [260]                                # Composite name
+        )
+
+        # header row: center text, stretch across column, and set column sizing
+        for ci, title in enumerate(headers):
+            lbl = ttk.Label(table, text=title, font=("Segoe UI", 9, "bold"), anchor="center")
+            lbl.grid(row=0, column=ci, sticky="ew", padx=6, pady=(0, 4))
+            weight = 0 if ci in (0, 1, 2) else 1  # first three typically don't stretch
+            table.grid_columnconfigure(ci, minsize=col_widths[ci], weight=weight, uniform="addcols")
+
+        # build one row of widgets per pending record
+        for ri, rec in enumerate(self.new_ids, start=1):
+            # Select checkbox
             var_sel = tk.BooleanVar(value=True)
-            chk = ttk.Checkbutton(rowf, variable=var_sel)
-            chk.grid(row=0, column=0, padx=6, sticky="w")
+            ttk.Checkbutton(table, variable=var_sel).grid(row=ri, column=0, padx=6, sticky="w")
 
-            ttk.Label(rowf, text=str(rec.get("GasIDREC", ""))).grid(row=0, column=1, padx=6, sticky="w")
-            ttk.Label(rowf, text=str(rec.get("PressuresIDREC", ""))).grid(row=0, column=2, padx=6, sticky="w")
+            # IDs (read-only labels)
+            ttk.Label(table, text=str(rec.get("GasIDREC", ""))).grid(row=ri, column=1, padx=6, sticky="w")
+            ttk.Label(table, text=str(rec.get("PressuresIDREC", ""))).grid(row=ri, column=2, padx=6, sticky="w")
 
-            # entries for ENTRY_FIELDS
+            # text entry fields
             entry_vars = {}
-            base_col = 3
-            for j, col in enumerate(ENTRY_FIELDS):
-                v = tk.StringVar(value="" if col == "Well Name" else "")
-                e = ttk.Entry(rowf, textvariable=v, width=22)
-                e.grid(row=0, column=base_col + j, padx=6, sticky="w")
+            col_index = 3
+            for col in ENTRY_FIELDS:
+                v = tk.StringVar(value="")
+                e = ttk.Entry(table, textvariable=v)
+                e.grid(row=ri, column=col_index, padx=6, sticky="ew")
                 entry_vars[col] = v
+                col_index += 1
 
-            # dropdowns for DROPDOWN_FIELDS
+            # dropdown fields
             dropdown_vars = {}
-            base2 = base_col + len(ENTRY_FIELDS)
-            for k, col in enumerate(DROPDOWN_FIELDS):
+            for col in DROPDOWN_FIELDS:
                 v = tk.StringVar(value="")
                 choices = self.dropdown_options.get(col, [])
-                cb = ttk.Combobox(rowf, textvariable=v, values=choices, width=20, state="readonly")
-                cb.grid(row=0, column=base2 + k, padx=6, sticky="w")
+                cb = ttk.Combobox(table, textvariable=v, values=choices, state="readonly")
+                cb.grid(row=ri, column=col_index, padx=6, sticky="ew")
                 dropdown_vars[col] = v
+                col_index += 1
 
+            # Composite (read-only), auto-computed from Well Name / Layer Producer / Completions Technology
+            comp_var = tk.StringVar(value="")
+
+            def _sync_comp():
+                comp = compose_name(
+                    entry_vars.get("Well Name", tk.StringVar(value="")).get(),
+                    dropdown_vars.get("Layer Producer", tk.StringVar(value="")).get(),
+                    dropdown_vars.get("Completions Technology", tk.StringVar(value="")).get(),
+                )
+                comp_var.set(comp or "")
+
+            if "Well Name" in entry_vars:
+                entry_vars["Well Name"].trace_add("write", lambda *a: _sync_comp())
+            if "Layer Producer" in dropdown_vars:
+                dropdown_vars["Layer Producer"].trace_add("write", lambda *a: _sync_comp())
+            if "Completions Technology" in dropdown_vars:
+                dropdown_vars["Completions Technology"].trace_add("write", lambda *a: _sync_comp())
+            _sync_comp()
+
+            # Composite label at end (uses the same table container + current col_index)
+            ttk.Label(table, textvariable=comp_var).grid(row=ri, column=col_index, padx=6, sticky="w")
+
+            # stash vars for saving later in do_update()
             self.new_widgets.append({
                 "selected": var_sel,
                 "gas": rec.get("GasIDREC"),
                 "pres": rec.get("PressuresIDREC"),
                 "entries": entry_vars,
                 "dropdowns": dropdown_vars,
+                "comp_var": comp_var,
             })
 
+
+
+    
+    def on_tree_click(self, event):
+        """Toggle checkbox if user clicked the Select column; otherwise let Treeview handle selection."""
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        column = self.tree.identify_column(event.x)  # '#1' = first displayed col
+        if column != "#1":
+            return  # only handle clicks in Select column
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        # toggle
+        current = self.tree.set(item, "Select")
+        new = "☑" if current != "☑" else "☐"
+        self.tree.set(item, "Select", new)
+        if new == "☑":
+            self._checked.add(item)
+        else:
+            self._checked.discard(item)
+
+    def on_tree_double_click(self, event):
+        """Start inline editing for editable cells."""
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        item = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)   # '#1', '#2', ...
+        if not item or not col_id:
+            return
+
+        # map '#n' to column name
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except:
+            return
+        if col_index < 0 or col_index >= len(self.columns_present):
+            return
+        col_name = self.columns_present[col_index]
+
+        # not editable?
+        if col_name in ("Select", AUTONUMBER_FIELD, "GasIDREC", "PressuresIDREC"):
+            return
+        if col_name not in EDITABLE_FIELDS:
+            return
+
+        # get current cell bbox
+        bbox = self.tree.bbox(item, col_id)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        # existing value
+        current_val = self.tree.set(item, col_name)
+
+        # destroy old editor if any
+        if self._cell_editor is not None:
+            try:
+                self._cell_editor.destroy()
+            except:
+                pass
+            self._cell_editor = None
+
+        # dropdowns use Combobox; others use Entry
+        if col_name in self.dropdown_options:
+            editor = ttk.Combobox(self.tree, values=self.dropdown_options[col_name], state="readonly")
+            editor.set(current_val)
+        else:
+            editor = ttk.Entry(self.tree)
+            editor.insert(0, str(current_val) if current_val is not None else "")
+
+        # place over cell
+        editor.place(x=x, y=y, width=w, height=h)
+        editor.focus_set()
+        self._cell_editor = editor
+
+        def _finish(event=None):
+            val = editor.get().strip()
+            editor.destroy()
+            self._cell_editor = None
+            # update UI
+            self.tree.set(item, col_name, val)
+            # record pending edit
+            self._pending_edits.setdefault(item, {})[col_name] = (val if val != "" else None)
+
+            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
+                comp = compose_name(
+                    self.tree.set(item, "Well Name"),
+                    self.tree.set(item, "Layer Producer"),
+                    self.tree.set(item, "Completions Technology"),
+            )
+            if "Composite name" in self.columns_present:
+                self.tree.set(item, "Composite name", comp or "")
+            self._pending_edits.setdefault(item, {})["Composite name"] = comp
+            
+            
+            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
+                comp = compose_name(
+                    self.tree.set(item, "Well Name"),
+                    self.tree.set(item, "Layer Producer"),
+                    self.tree.set(item, "Completions Technology"),
+                )
+                if "Composite name" in self.columns_present:
+                    self.tree.set(item, "Composite name", comp or "")
+                # queue composite for save too
+                self._pending_edits.setdefault(item, {})["Composite name"] = comp
+        
+        
+        editor.bind("<Return>", _finish)
+        editor.bind("<Escape>", lambda e: (editor.destroy(), setattr(self, "_cell_editor", None)))
+        editor.bind("<FocusOut>", _finish)
+
+    def save_checked_edits(self):
+        """Apply pending edits for checked rows to Access."""
+        if not self._checked:
+            messagebox.showinfo("No rows checked", "Check the rows you want to save, then try again.")
+            return
+
+        # collect updates: only for checked rows, only columns with pending edits
+        to_update = {iid: edits for iid, edits in self._pending_edits.items() if iid in self._checked and edits}
+
+        if not to_update:
+            messagebox.showinfo("Nothing to save", "No pending edits on checked rows.")
+            return
+
+        db_path = self.db_path_var.get()
+        table = self.table_var.get()
+        updated = 0
+        failed = 0
+
+        with connect_access(db_path) as conn:
+            for iid, payload in to_update.items():
+                # iid is Access ID if the item was inserted that way
+                try:
+                    rec_id = int(iid)
+                except:
+                    # fallback: try to resolve by IDs in the row
+                    row_vals = {c: self.tree.set(iid, c) for c in self.columns_present if c != "Select"}
+                    rec_id = find_existing_id(conn, table, row_vals.get("GasIDREC"), row_vals.get("PressuresIDREC"))
+
+                if not rec_id:
+                    failed += 1
+                    continue
+
+                # sanity: don’t try to update non-editables or ID columns
+                safe_payload = {k: v for k, v in payload.items() if k in EDITABLE_FIELDS}
+
+                wn = payload.get("Well Name", self.tree.set(iid, "Well Name"))
+                lp = payload.get("Layer Producer", self.tree.set(iid, "Layer Producer"))
+                ct = payload.get("Completions Technology", self.tree.set(iid, "Completions Technology"))
+                comp = compose_name(wn, lp, ct)
+                if comp is not None:
+                    safe_payload["Composite name"] = comp
+                    if "Composite name" in self.columns_present:
+                        self.tree.set(iid, "Composite name", comp)    
+                
+                
+                try:
+                    update_record(conn, table, rec_id, safe_payload)
+                    updated += 1
+                except Exception as e:
+                    failed += 1
+                    messagebox.showerror("Update Error", f"Failed to update ID={rec_id}:\n{e}")
+                    return
+
+            conn.commit()
+
+        # reset pending for saved rows
+        for iid in list(self._checked):
+            self._pending_edits.pop(iid, None)
+
+        messagebox.showinfo("Done", f"Updated: {updated}\nFailed: {failed}")
+        self.reload_all()
+
     def do_update(self):
-        # collect selected payloads from UI
+        # collect selected payloads from the Add New tab
         rows = []
         for item in self.new_widgets:
             if not item["selected"].get():
@@ -334,6 +630,9 @@ class App(tk.Tk):
                 payload[col] = v.get().strip() or None
             for col, v in item["dropdowns"].items():
                 payload[col] = v.get().strip() or None
+            
+            payload["Composite name"] = item["comp_var"].get() or None
+            
             rows.append(payload)
 
         if not rows:
@@ -386,6 +685,7 @@ class App(tk.Tk):
 
         messagebox.showinfo("Done", f"Updated: {updated}\nInserted: {inserted}\nSkipped: {skipped}")
         self.reload_all()
+
 
 
 
