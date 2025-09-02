@@ -246,6 +246,15 @@ class App(tk.Tk):
         # columns list gets set in reload_all; create an empty tree for now
         self.tree = ttk.Treeview(tree_wrap, show="headings")
 
+        style = ttk.Style(self)
+        style.theme_use("clam")  # clam supports simple borders nicely
+        style.configure("Treeview", borderwidth=1, relief="solid")
+        style.configure("Treeview.Heading", borderwidth=1, relief="solid")
+
+        style.configure("Slim.TCheckbutton", padding=0)
+        style.configure("TEntry", padding=(4, 2))
+        style.configure("TCombobox", padding=(4, 2))
+
         # scrollbars
         ys = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
         xs = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.tree.xview)
@@ -330,10 +339,15 @@ class App(tk.Tk):
         self._pending_edits = {}
         self._cell_editor = None
 
+        # zebra striping (you already had this)
+        self.tree.tag_configure("even", background="#ffffff")
+        self.tree.tag_configure("odd",  background="#f7f7f7")
+
         for idx, row in self.df_current.iterrows():
             iid = str(row["ID"]) if "ID" in row and pd.notna(row["ID"]) else str(idx)
             values = ["☐"] + [row.get(c, "") for c in cols_present]
-            self.tree.insert("", "end", iid=iid, values=values)
+            tag = "odd" if (idx % 2) else "even"
+            self.tree.insert("", "end", iid=iid, values=values, tags=(tag,))
 
         # dropdown options from existing data
         self.dropdown_options = get_unique_options(self.df_current)
@@ -348,88 +362,99 @@ class App(tk.Tk):
 
         self.count_label.config(text=f"Loaded {len(self.df_current)} existing rows • {len(self.new_ids)} pending IDs")
 
+
+
     def build_add_rows(self):
-    
-    # wipe previous UI
         for child in list(self.scroll.viewPort.children.values()):
             child.destroy()
         self.new_widgets.clear()
 
-        # one shared container so headers + all rows use the same grid columns
         table = ttk.Frame(self.scroll.viewPort)
         table.pack(fill="both", expand=True, padx=8, pady=4)
 
-        # column headers (add Composite name at the end)
-        headers = ["Select", "GasIDREC", "PressuresIDREC", *ENTRY_FIELDS, *DROPDOWN_FIELDS, "Composite name"]
-
-        # target min widths for each column
+        # Header: make Select super narrow; others reasonable
+        headers = ["", "GasIDREC", "PressuresIDREC", *ENTRY_FIELDS, *DROPDOWN_FIELDS, "Composite name"]
         col_widths = (
-            [70, 160, 160] +                    # Select, GasIDREC, PressuresIDREC
-            [220] * len(ENTRY_FIELDS) +         # entry fields
-            [200] * len(DROPDOWN_FIELDS) +      # dropdown fields
-            [260]                                # Composite name
+            [36, 150, 150] +                 # Select, GasIDREC, PressuresIDREC
+            [200] * len(ENTRY_FIELDS) +      # text entry fields
+            [180] * len(DROPDOWN_FIELDS) +   # dropdown fields
+            [240]                             # Composite
         )
 
-        # header row: center text, stretch across column, and set column sizing
+        # header row — bordered labels so it looks like a grid
         for ci, title in enumerate(headers):
-            lbl = ttk.Label(table, text=title, font=("Segoe UI", 9, "bold"), anchor="center")
-            lbl.grid(row=0, column=ci, sticky="ew", padx=6, pady=(0, 4))
-            weight = 0 if ci in (0, 1, 2) else 1  # first three typically don't stretch
+            text = "✓" if ci == 0 else title
+            hdr = tk.Label(
+                table, text=text, font=("Segoe UI", 9, "bold"),
+                bg="#f3f3f3", bd=1, relief="solid", anchor="center"
+            )
+            hdr.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0, ipadx=4, ipady=3)
+            weight = 0 if ci in (0, 1, 2) else 1
             table.grid_columnconfigure(ci, minsize=col_widths[ci], weight=weight, uniform="addcols")
 
-        # build one row of widgets per pending record
+        # helper: make a bordered cell that holds a widget
+        def wrap_cell(parent, row, col):
+            wrapper = tk.Frame(parent, bd=1, relief="solid")
+            wrapper.grid(row=row, column=col, sticky="nsew", padx=0, pady=0)
+            return wrapper
+
+        # rows
         for ri, rec in enumerate(self.new_ids, start=1):
-            # Select checkbox
+            # Select checkbox (centered, slim)
+            cell0 = wrap_cell(table, ri, 0)
             var_sel = tk.BooleanVar(value=True)
-            ttk.Checkbutton(table, variable=var_sel).grid(row=ri, column=0, padx=6, sticky="w")
+            chk = ttk.Checkbutton(cell0, variable=var_sel, style="Slim.TCheckbutton")
+            chk.pack(anchor="center", padx=0, pady=0)
 
-            # IDs (read-only labels)
-            ttk.Label(table, text=str(rec.get("GasIDREC", ""))).grid(row=ri, column=1, padx=6, sticky="w")
-            ttk.Label(table, text=str(rec.get("PressuresIDREC", ""))).grid(row=ri, column=2, padx=6, sticky="w")
+            # GasID / PressuresID — bordered labels
+            tk.Label(wrap_cell(table, ri, 1), text=str(rec.get("GasIDREC") or ""), anchor="w").pack(
+                fill="x", expand=True, padx=4, pady=2
+            )
+            tk.Label(wrap_cell(table, ri, 2), text=str(rec.get("PressuresIDREC") or ""), anchor="w").pack(
+                fill="x", expand=True, padx=4, pady=2
+            )
 
-            # text entry fields
+            # entry fields — ttk.Entry inside a bordered cell
             entry_vars = {}
             col_index = 3
             for col in ENTRY_FIELDS:
                 v = tk.StringVar(value="")
-                e = ttk.Entry(table, textvariable=v)
-                e.grid(row=ri, column=col_index, padx=6, sticky="ew")
+                w = wrap_cell(table, ri, col_index)
+                ttk.Entry(w, textvariable=v).pack(fill="x", expand=True, padx=4, pady=2)
                 entry_vars[col] = v
                 col_index += 1
 
-            # dropdown fields
+            # dropdown fields — ttk.Combobox inside a bordered cell
             dropdown_vars = {}
             for col in DROPDOWN_FIELDS:
                 v = tk.StringVar(value="")
-                choices = self.dropdown_options.get(col, [])
-                cb = ttk.Combobox(table, textvariable=v, values=choices, state="readonly")
-                cb.grid(row=ri, column=col_index, padx=6, sticky="ew")
+                w = wrap_cell(table, ri, col_index)
+                ttk.Combobox(w, textvariable=v, values=self.dropdown_options.get(col, []), state="readonly") \
+                    .pack(fill="x", expand=True, padx=4, pady=2)
                 dropdown_vars[col] = v
                 col_index += 1
 
-            # Composite (read-only), auto-computed from Well Name / Layer Producer / Completions Technology
+            # Composite (read-only) — label inside a bordered cell
             comp_var = tk.StringVar(value="")
+            w_comp = wrap_cell(table, ri, col_index)
+            ttk.Label(w_comp, textvariable=comp_var).pack(fill="x", expand=True, padx=4, pady=2)
 
-            def _sync_comp():
-                comp = compose_name(
-                    entry_vars.get("Well Name", tk.StringVar(value="")).get(),
-                    dropdown_vars.get("Layer Producer", tk.StringVar(value="")).get(),
-                    dropdown_vars.get("Completions Technology", tk.StringVar(value="")).get(),
-                )
-                comp_var.set(comp or "")
+            # keep Composite in sync with the three parts
+            def _sync_comp_inner(*_):
+                wname = entry_vars.get("Well Name").get() if "Well Name" in entry_vars else ""
+                layer = dropdown_vars.get("Layer Producer").get() if "Layer Producer" in dropdown_vars else ""
+                tech  = dropdown_vars.get("Completions Technology").get() if "Completions Technology" in dropdown_vars else ""
+                comp_var.set(compose_name(wname, layer, tech) or "")
 
             if "Well Name" in entry_vars:
-                entry_vars["Well Name"].trace_add("write", lambda *a: _sync_comp())
+                entry_vars["Well Name"].trace_add("write", _sync_comp_inner)
             if "Layer Producer" in dropdown_vars:
-                dropdown_vars["Layer Producer"].trace_add("write", lambda *a: _sync_comp())
+                dropdown_vars["Layer Producer"].trace_add("write", _sync_comp_inner)
             if "Completions Technology" in dropdown_vars:
-                dropdown_vars["Completions Technology"].trace_add("write", lambda *a: _sync_comp())
-            _sync_comp()
+                dropdown_vars["Completions Technology"].trace_add("write", _sync_comp_inner)
+            _sync_comp_inner()
 
-            # Composite label at end (uses the same table container + current col_index)
-            ttk.Label(table, textvariable=comp_var).grid(row=ri, column=col_index, padx=6, sticky="w")
-
-            # stash vars for saving later in do_update()
+            # stash for save
             self.new_widgets.append({
                 "selected": var_sel,
                 "gas": rec.get("GasIDREC"),
@@ -463,7 +488,6 @@ class App(tk.Tk):
             self._checked.discard(item)
 
     def on_tree_double_click(self, event):
-        """Start inline editing for editable cells."""
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
@@ -475,7 +499,7 @@ class App(tk.Tk):
         # map '#n' to column name
         try:
             col_index = int(col_id.replace("#", "")) - 1
-        except:
+        except Exception:
             return
         if col_index < 0 or col_index >= len(self.columns_present):
             return
@@ -500,7 +524,7 @@ class App(tk.Tk):
         if self._cell_editor is not None:
             try:
                 self._cell_editor.destroy()
-            except:
+            except Exception:
                 pass
             self._cell_editor = None
 
@@ -518,25 +542,19 @@ class App(tk.Tk):
         self._cell_editor = editor
 
         def _finish(event=None):
+            # pull value and remove the overlay editor
             val = editor.get().strip()
-            editor.destroy()
-            self._cell_editor = None
-            # update UI
+            try:
+                editor.destroy()
+            finally:
+                self._cell_editor = None
+
+            # write to the tree cell
             self.tree.set(item, col_name, val)
-            # record pending edit
+            # remember as a pending edit (None means clear)
             self._pending_edits.setdefault(item, {})[col_name] = (val if val != "" else None)
 
-            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
-                comp = compose_name(
-                    self.tree.set(item, "Well Name"),
-                    self.tree.set(item, "Layer Producer"),
-                    self.tree.set(item, "Completions Technology"),
-            )
-            if "Composite name" in self.columns_present:
-                self.tree.set(item, "Composite name", comp or "")
-            self._pending_edits.setdefault(item, {})["Composite name"] = comp
-            
-            
+            # if a Composite component changed, recompute & queue it too
             if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
                 comp = compose_name(
                     self.tree.set(item, "Well Name"),
@@ -545,13 +563,16 @@ class App(tk.Tk):
                 )
                 if "Composite name" in self.columns_present:
                     self.tree.set(item, "Composite name", comp or "")
-                # queue composite for save too
                 self._pending_edits.setdefault(item, {})["Composite name"] = comp
-        
-        
+
+        # IMPORTANT: these binds must be OUTSIDE the _finish function
         editor.bind("<Return>", _finish)
         editor.bind("<Escape>", lambda e: (editor.destroy(), setattr(self, "_cell_editor", None)))
         editor.bind("<FocusOut>", _finish)
+        editor.bind("<Tab>", _finish)  # optional: tab commits too
+
+
+
 
     def save_checked_edits(self):
         """Apply pending edits for checked rows to Access."""
@@ -595,9 +616,8 @@ class App(tk.Tk):
                 if comp is not None:
                     safe_payload["Composite name"] = comp
                     if "Composite name" in self.columns_present:
-                        self.tree.set(iid, "Composite name", comp)    
-                
-                
+                        self.tree.set(iid, "Composite name", comp)
+
                 try:
                     update_record(conn, table, rec_id, safe_payload)
                     updated += 1
@@ -684,7 +704,16 @@ class App(tk.Tk):
             conn.commit()
 
         messagebox.showinfo("Done", f"Updated: {updated}\nInserted: {inserted}\nSkipped: {skipped}")
-        self.reload_all()
+
+        # Only rebuild the UI if we actually changed the DB.
+        # If everything was skipped (e.g., you hit "No" on the duplicate prompt),
+        # keep the current inputs so you can edit and try again.
+        if (updated + inserted) > 0:
+            self.reload_all()
+        else:
+            # No-op refresh: leave the current Add New rows exactly as they are
+            # so you can change values without retyping.
+            pass
 
 
 
