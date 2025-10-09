@@ -285,11 +285,7 @@ class CellEditor:
 
         self.widget.pack(fill="both", expand=True)
 
-        # focus + grab
-        try:
-            self.top.grab_set()
-        except Exception:
-            pass
+        # focus + grab (but allow scrolling)
         try:
             self.top.focus_force()
         except Exception:
@@ -299,8 +295,10 @@ class CellEditor:
         except Exception:
             pass
 
+        # Don't use grab_set() as it prevents scrolling
+        # Instead, use a more gentle approach
         try:
-            self.top.after(150, lambda: self.top.attributes("-topmost", False))
+            self.top.after(100, lambda: self.top.attributes("-topmost", False))
         except Exception:
             pass
 
@@ -330,10 +328,6 @@ class CellEditor:
         self.destroy()
 
     def destroy(self):
-        try:
-            self.top.grab_release()
-        except Exception:
-            pass
         try:
             self.top.destroy()
         except Exception:
@@ -586,10 +580,13 @@ class App(tk.Tk):
         self.tree.bind("<Button-4>",             self.on_mousewheel)   # Linux up
         self.tree.bind("<Button-5>",             self.on_mousewheel)   # Linux down
 
-        self.tree.bind("<Button-1>", self.on_tree_click)          # toggle Select when clicking column 1 cell
-        self.tree.bind("<Double-1>", self.on_tree_double_click)   # start editor
+        self.tree.bind("<Button-1>", self.on_tree_click)          # single click for editing
+        self.tree.bind("<Double-1>", self.on_tree_double_click)   # double click also works
         self.bind("<FocusOut>", lambda e: self._close_editor(False), add="+")
         self.tree.bind("<space>", self.on_space_toggle)
+        
+        # Close editor when clicking elsewhere
+        self.bind("<Button-1>", self.on_app_click, add="+")
 
         # Footer (tab 1)
         current_footer = ttk.Frame(self.tab_current, style="Modern.TFrame")
@@ -644,7 +641,6 @@ class App(tk.Tk):
         """
         Close the active cell editor (if any).
         commit=False: discard, commit=True: commit current value.
-        Ensures any grab held by the editor is released.
         """
         ed = self._editor
         if not ed:
@@ -653,13 +649,9 @@ class App(tk.Tk):
             if commit:
                 ed._commit()
             else:
-                ed.destroy()   # destroy() releases grab inside CellEditor
+                ed.destroy()
         except Exception:
-            try:
-                if getattr(ed, "top", None):
-                    ed.top.grab_release()
-            except Exception:
-                pass
+            pass
         finally:
             self._editor = None
 
@@ -893,29 +885,97 @@ class App(tk.Tk):
 
     def on_tree_click(self, event):
         """
-        Click in column #1 toggles checkbox. For any other region (headers, separators,
-        scrollbar, empty space), we close any editor and let Tk handle the default behavior.
+        Handle single clicks for both checkbox toggling and cell editing.
+        - Column #1: Toggle checkbox
+        - Other editable columns: Start editing (if row is checked)
+        - Non-editable areas: Close editor and allow default behavior
         """
         region = self.tree.identify("region", event.x, event.y)   # 'cell', 'heading', 'separator', 'tree', 'nothing'
         column = self.tree.identify_column(event.x)               # '#1' = Select
         item   = self.tree.identify_row(event.y)
 
-        # Toggle only when clicking the Select column on a valid row
+        # Handle checkbox column
         if region == "cell" and column == "#1" and item:
             self.tree.focus(item)
             self._toggle_item_checkbox(item)
             return "break"  # we handled it
 
-        # For everything else, just close the editor and allow default behavior
+        # Handle editable cell clicks
+        if region == "cell" and item and column and column != "#1":
+            # Check if this is an editable column
+            try:
+                col_index = int(column.replace("#", "")) - 1
+                if 0 <= col_index < len(self.columns_present):
+                    col_name = self.columns_present[col_index]
+                    
+                    # Check if column is editable and row is checked
+                    if (col_name in EDITABLE_FIELDS and 
+                        item in self._checked and 
+                        item not in getattr(self, "_pending_row_ids", set())):
+                        
+                        # Start editing immediately
+                        self._start_cell_edit(item, col_name, event.x, event.y)
+                        return "break"
+            except (ValueError, IndexError):
+                pass
+
+        # For everything else, close editor and allow default behavior
         if self._editor:
             self._close_editor(False)
         # NOTE: intentionally no 'return "break"' here
 
+    def _start_cell_edit(self, item, col_name, x, y):
+        """
+        Start editing a cell. This is called from both single-click and double-click handlers.
+        """
+        # Get column ID for bbox calculation
+        try:
+            col_index = self.columns_present.index(col_name)
+            col_id = f"#{col_index + 1}"
+        except (ValueError, IndexError):
+            return
+
+        # Cell rectangle and current value
+        bbox = self.tree.bbox(item, col_id)
+        if not bbox:
+            return
+        
+        current_val = self.tree.set(item, col_name)
+        options = self.dropdown_options.get(col_name) if col_name in self.dropdown_options else None
+
+        # Close any previous editor
+        self._close_editor(False)
+
+        def _commit(value: str):
+            # record change in grid
+            self.tree.set(item, col_name, value)
+            self._pending_edits.setdefault(item, {})[col_name] = (value if value != "" else None)
+            # keep Composite name in sync
+            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
+                comp = compose_name(
+                    self.tree.set(item, "Well Name"),
+                    self.tree.set(item, "Layer Producer"),
+                    self.tree.set(item, "Completions Technology"),
+                )
+                if "Composite name" in self.columns_present:
+                    self.tree.set(item, "Composite name", comp or "")
+                self._pending_edits.setdefault(item, {})["Composite name"] = comp
+
+        # Create the detached editor window over the cell
+        self._editor = CellEditor(
+            app=self,
+            tree=self.tree,
+            item=item,
+            col_name=col_name,
+            bbox=bbox,
+            options=options,            # None => Entry, list => Combobox
+            current_val=current_val,
+            on_commit=_commit,
+        )
+
     def on_tree_double_click(self, event):
         """
-        Start a CellEditor over the double-clicked cell if it is editable.
-        - You must check (✓) the row first.
-        - Pending rows (blank Well Name, shown at bottom) are not editable here.
+        Double-click also starts editing (for users who prefer double-click).
         """
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
@@ -953,43 +1013,30 @@ class App(tk.Tk):
         if col_name not in EDITABLE_FIELDS:
             return
 
-        # Cell rectangle and current value
-        bbox = self.tree.bbox(item, col_id)
-        if not bbox:
-            return
-        x, y, w, h = bbox
-        current_val = self.tree.set(item, col_name)
-        options = self.dropdown_options.get(col_name) if col_name in self.dropdown_options else None
+        # Start editing
+        self._start_cell_edit(item, col_name, event.x, event.y)
 
-        # Close any previous editor
+    def on_app_click(self, event):
+        """
+        Handle clicks on the main app window to close editor when clicking outside.
+        """
+        # Only close editor if we're not clicking on the tree or editor
+        if self._editor and hasattr(self._editor, 'top'):
+            try:
+                # Check if click is on the editor
+                editor_x = self._editor.top.winfo_x()
+                editor_y = self._editor.top.winfo_y()
+                editor_w = self._editor.top.winfo_width()
+                editor_h = self._editor.top.winfo_height()
+                
+                if (editor_x <= event.x <= editor_x + editor_w and 
+                    editor_y <= event.y <= editor_y + editor_h):
+                    return  # Don't close editor if clicking on it
+            except Exception:
+                pass
+        
+        # Close editor if clicking elsewhere
         self._close_editor(False)
-
-        def _commit(value: str):
-            # record change in grid
-            self.tree.set(item, col_name, value)
-            self._pending_edits.setdefault(item, {})[col_name] = (value if value != "" else None)
-            # keep Composite name in sync
-            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
-                comp = compose_name(
-                    self.tree.set(item, "Well Name"),
-                    self.tree.set(item, "Layer Producer"),
-                    self.tree.set(item, "Completions Technology"),
-                )
-                if "Composite name" in self.columns_present:
-                    self.tree.set(item, "Composite name", comp or "")
-                self._pending_edits.setdefault(item, {})["Composite name"] = comp
-
-        # Create the detached editor window over the cell
-        self._editor = CellEditor(
-            app=self,
-            tree=self.tree,
-            item=item,
-            col_name=col_name,
-            bbox=(x, y, w, h),
-            options=options,            # None => Entry, list => Combobox
-            current_val=current_val,
-            on_commit=_commit,
-        )
 
     def _toggle_item_checkbox(self, item: str):
         """Shared logic to toggle the ✓ cell, including staging pending rows."""
@@ -1044,12 +1091,34 @@ class App(tk.Tk):
 
     def on_mousewheel(self, event):
         """
-        Predictable scrolling that also closes any inline editor:
+        Improved scrolling that works even when editor is open:
         - Vertical by default
         - Hold Shift for horizontal
+        - Closes editor only when scrolling outside the editor area
         Works on Windows/macOS (<MouseWheel>) and Linux (<Button-4/5>).
         """
-        # Always close the editor when scrolling
+        # Check if we're scrolling over the editor
+        if self._editor and hasattr(self._editor, 'top'):
+            try:
+                # Get editor window position and size
+                editor_x = self._editor.top.winfo_x()
+                editor_y = self._editor.top.winfo_y()
+                editor_w = self._editor.top.winfo_width()
+                editor_h = self._editor.top.winfo_height()
+                
+                # Get mouse position relative to root window
+                mouse_x = self.winfo_pointerx() - self.winfo_rootx()
+                mouse_y = self.winfo_pointery() - self.winfo_rooty()
+                
+                # Check if mouse is over the editor
+                if (editor_x <= mouse_x <= editor_x + editor_w and 
+                    editor_y <= mouse_y <= editor_y + editor_h):
+                    # Don't close editor if scrolling over it
+                    return "break"
+            except Exception:
+                pass
+        
+        # Close editor when scrolling outside of it
         self._close_editor(False)
 
         # Shift pressed?
