@@ -1,4 +1,29 @@
 import tkinter as tk
+
+# Make Tkinter windows look more modern (if available)
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # High DPI awareness on Windows
+except Exception:
+    pass  # Not critical if unavailable
+
+def center_window(window, width=900, height=600):
+    """Centers a Tkinter window on the screen with a given width and height."""
+    window.update_idletasks()
+    screen_width = window.winfo_screenwidth()
+    screen_height = window.winfo_screenheight()
+    x = int((screen_width / 2) - (width / 2))
+    y = int((screen_height / 2) - (height / 2))
+    window.geometry(f'{width}x{height}+{x}+{y}')
+
+def set_app_icon(window, icon_path=None):
+    """Optionally sets an application icon, if provided."""
+    if icon_path:
+        try:
+            window.iconbitmap(icon_path)
+        except Exception:
+            pass  # Don't break if icon fails to load
+
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 import pyodbc
@@ -251,20 +276,16 @@ class CellEditor:
 
         self.is_combo = options is not None
         if self.is_combo:
-            self.widget = ttk.Combobox(self.top, values=options, state="readonly")
+            self.widget = ttk.Combobox(self.top, values=options, state="readonly", style="Modern.TCombobox")
             self.widget.set(current_val if current_val is not None else "")
         else:
-            self.widget = ttk.Entry(self.top)
+            self.widget = ttk.Entry(self.top, style="Modern.TEntry")
             if current_val is not None:
                 self.widget.insert(0, str(current_val))
 
         self.widget.pack(fill="both", expand=True)
 
-        # focus + grab
-        try:
-            self.top.grab_set()
-        except Exception:
-            pass
+        # focus + grab (but allow scrolling)
         try:
             self.top.focus_force()
         except Exception:
@@ -274,8 +295,10 @@ class CellEditor:
         except Exception:
             pass
 
+        # Don't use grab_set() as it prevents scrolling
+        # Instead, use a more gentle approach
         try:
-            self.top.after(150, lambda: self.top.attributes("-topmost", False))
+            self.top.after(100, lambda: self.top.attributes("-topmost", False))
         except Exception:
             pass
 
@@ -306,10 +329,6 @@ class CellEditor:
 
     def destroy(self):
         try:
-            self.top.grab_release()
-        except Exception:
-            pass
-        try:
             self.top.destroy()
         except Exception:
             pass
@@ -328,30 +347,61 @@ class App(tk.Tk):
     """
     def __init__(self):
         super().__init__()
-        self.title("WM Updater — Gas/Pressure IDs to Access")
-        self.geometry("1360x800")
+        self.title("🔧 WM Updater — Gas/Pressure IDs to Access")
+        self.geometry("1400x850")
+        
+        # Set modern window properties
+        try:
+            self.state('zoomed')  # Windows
+        except:
+            try:
+                self.attributes('-zoomed', True)  # Linux
+            except:
+                pass
 
-        # --- Toolbar
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", padx=8, pady=6)
+        # --- Modern Toolbar
+        toolbar = ttk.Frame(self, style="Modern.TFrame")
+        toolbar.pack(fill="x", padx=16, pady=12)
+        
+        # Toolbar content frame with better spacing
+        toolbar_content = ttk.Frame(toolbar, style="Modern.TFrame")
+        toolbar_content.pack(fill="x")
+        
         self.db_path_var = tk.StringVar(value=ACCESS_DB_PATH)
         self.table_var = tk.StringVar(value=ACCESS_TABLE_NAME)
-        ttk.Label(toolbar, text="Access DB:").pack(side="left")
-        ttk.Entry(toolbar, textvariable=self.db_path_var, width=80).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="…", command=self.pick_db).pack(side="left")
-        ttk.Label(toolbar, text="  Table:").pack(side="left", padx=(12, 0))
-        ttk.Entry(toolbar, textvariable=self.table_var, width=20).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Reload", command=self.reload_all).pack(side="left", padx=8)
+        
+        # Database path section
+        db_section = ttk.Frame(toolbar_content, style="Modern.TFrame")
+        db_section.pack(side="left", fill="x", expand=True)
+        
+        ttk.Label(db_section, text="Database:", style="Modern.TLabel").pack(side="left")
+        ttk.Entry(db_section, textvariable=self.db_path_var, width=60, style="Modern.TEntry").pack(side="left", padx=(8, 4))
+        ttk.Button(db_section, text="Browse", command=self.pick_db, style="Modern.TButton").pack(side="left", padx=4)
+        
+        # Table section
+        table_section = ttk.Frame(toolbar_content, style="Modern.TFrame")
+        table_section.pack(side="right")
+        
+        ttk.Label(table_section, text="Table:", style="Modern.TLabel").pack(side="left")
+        ttk.Entry(table_section, textvariable=self.table_var, width=20, style="Modern.TEntry").pack(side="left", padx=(8, 4))
+        ttk.Button(table_section, text="Reload", command=self.reload_all, style="Success.TButton").pack(side="left")
 
-        # --- Notebook
-        self.nb = ttk.Notebook(self)
+        # --- Modern Notebook with subtle border
+        notebook_frame = ttk.Frame(self, style="Modern.TFrame")
+        notebook_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        
+        self.nb = ttk.Notebook(notebook_frame)
         self.nb.pack(fill="both", expand=True)
 
         # ========== Tab 1: Current Wells
-        self.tab_current = ttk.Frame(self.nb)
-        self.nb.add(self.tab_current, text="Current Wells")
+        self.tab_current = ttk.Frame(self.nb, style="Modern.TFrame")
+        self.nb.add(self.tab_current, text="📊 Current Wells")
 
-        tree_wrap = ttk.Frame(self.tab_current)
+        # Modern treeview container with subtle border
+        tree_container = ttk.Frame(self.tab_current, style="Modern.TFrame")
+        tree_container.pack(fill="both", expand=True, padx=16, pady=16)
+        
+        tree_wrap = ttk.Frame(tree_container, style="Modern.TFrame")
         tree_wrap.pack(fill="both", expand=True)
 
         self.tree = ttk.Treeview(tree_wrap, show="headings", selectmode="none")
@@ -360,40 +410,151 @@ class App(tk.Tk):
         self._checked = set()
         self._pending_edits: dict[str, dict] = {}
 
-        # Styling
+        # Modern Styling
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except Exception:
             pass
 
+        # Modern color palette
+        self.colors = {
+            'primary': '#2563eb',      # Blue
+            'primary_hover': '#1d4ed8',
+            'secondary': '#64748b',    # Slate
+            'success': '#10b981',      # Green
+            'warning': '#f59e0b',      # Amber
+            'danger': '#ef4444',       # Red
+            'background': '#f8fafc',   # Light gray
+            'surface': '#ffffff',      # White
+            'surface_alt': '#f1f5f9', # Light slate
+            'border': '#e2e8f0',      # Light border
+            'text_primary': '#1e293b', # Dark slate
+            'text_secondary': '#64748b',
+            'text_muted': '#94a3b8'
+        }
+
+        # Configure main window background
+        self.configure(bg=self.colors['background'])
+
+        # Modern Treeview styling
         style.configure(
-            "Treeview",
+            "Modern.Treeview",
+            background=self.colors['surface'],
+            foreground=self.colors['text_primary'],
+            borderwidth=0,
+            rowheight=32,
+            font=('Segoe UI', 9),
+            fieldbackground=self.colors['surface']
+        )
+        
+        # Treeview selection styling
+        style.map(
+            "Modern.Treeview",
+            background=[("selected", self.colors['primary'])],
+            foreground=[("selected", self.colors['surface'])],
+        )
+
+        # Modern Treeview heading
+        style.configure(
+            "Modern.Treeview.Heading",
+            background=self.colors['surface_alt'],
+            foreground=self.colors['text_primary'],
+            borderwidth=0,
+            relief="flat",
+            font=('Segoe UI', 9, 'bold'),
+            padding=(12, 8)
+        )
+        style.map(
+            "Modern.Treeview.Heading",
+            background=[("active", self.colors['border'])],
+        )
+
+        # Modern button styles
+        style.configure(
+            "Modern.TButton",
+            background=self.colors['primary'],
+            foreground=self.colors['surface'],
+            borderwidth=0,
+            focuscolor="none",
+            font=('Segoe UI', 9, 'bold'),
+            padding=(16, 8)
+        )
+        style.map(
+            "Modern.TButton",
+            background=[("active", self.colors['primary_hover']), ("pressed", self.colors['primary_hover'])],
+        )
+
+        # Success button
+        style.configure(
+            "Success.TButton",
+            background=self.colors['success'],
+            foreground=self.colors['surface'],
+            borderwidth=0,
+            focuscolor="none",
+            font=('Segoe UI', 9, 'bold'),
+            padding=(16, 8)
+        )
+        style.map(
+            "Success.TButton",
+            background=[("active", "#059669"), ("pressed", "#059669")],
+        )
+
+        # Modern entry and combobox
+        style.configure(
+            "Modern.TEntry",
+            fieldbackground=self.colors['surface'],
             borderwidth=1,
             relief="solid",
-            rowheight=26,          # calmer, consistent row height
+            bordercolor=self.colors['border'],
+            font=('Segoe UI', 9),
+            padding=(8, 6)
         )
-        # If something manages to “select”, keep it visually neutral
         style.map(
-            "Treeview",
-            background=[("selected", "#ffffff")],
-            foreground=[("selected", "#000000")],
+            "Modern.TEntry",
+            bordercolor=[("focus", self.colors['primary'])],
         )
 
         style.configure(
-            "Treeview.Heading",
-            background="#f3f3f3",
+            "Modern.TCombobox",
+            fieldbackground=self.colors['surface'],
             borderwidth=1,
             relief="solid",
+            bordercolor=self.colors['border'],
+            font=('Segoe UI', 9),
+            padding=(8, 6)
         )
         style.map(
-            "Treeview.Heading",
-            relief=[("pressed", "sunken"), ("active", "raised")],
+            "Modern.TCombobox",
+            bordercolor=[("focus", self.colors['primary'])],
         )
 
-        style.configure("Slim.TCheckbutton", padding=0)
-        style.configure("TEntry", padding=(4, 2))
-        style.configure("TCombobox", padding=(4, 2))
+        # Modern checkbutton
+        style.configure(
+            "Modern.TCheckbutton",
+            background=self.colors['surface'],
+            foreground=self.colors['text_primary'],
+            font=('Segoe UI', 9),
+            padding=0
+        )
+
+        # Modern label
+        style.configure(
+            "Modern.TLabel",
+            background=self.colors['background'],
+            foreground=self.colors['text_primary'],
+            font=('Segoe UI', 9)
+        )
+
+        # Modern frame
+        style.configure(
+            "Modern.TFrame",
+            background=self.colors['background'],
+            borderwidth=0
+        )
+
+        # Apply modern styles
+        self.tree.configure(style="Modern.Treeview")
 
         # Scrollbars: close editor whenever you scroll via bars
         ys = ttk.Scrollbar(tree_wrap, orient="vertical")
@@ -419,35 +580,42 @@ class App(tk.Tk):
         self.tree.bind("<Button-4>",             self.on_mousewheel)   # Linux up
         self.tree.bind("<Button-5>",             self.on_mousewheel)   # Linux down
 
-        self.tree.bind("<Button-1>", self.on_tree_click)          # toggle Select when clicking column 1 cell
-        self.tree.bind("<Double-1>", self.on_tree_double_click)   # start editor
+        self.tree.bind("<Button-1>", self.on_tree_click)          # single click for editing
+        self.tree.bind("<Double-1>", self.on_tree_double_click)   # double click also works
         self.bind("<FocusOut>", lambda e: self._close_editor(False), add="+")
         self.tree.bind("<space>", self.on_space_toggle)
+        
+        # Close editor when clicking elsewhere
+        self.bind("<Button-1>", self.on_app_click, add="+")
 
         # Footer (tab 1)
-        current_footer = ttk.Frame(self.tab_current)
-        current_footer.pack(fill="x", padx=8, pady=(4, 8))
-        ttk.Button(current_footer, text="Save checked edits → Access", command=self.save_checked_edits).pack(side="right")
+        current_footer = ttk.Frame(self.tab_current, style="Modern.TFrame")
+        current_footer.pack(fill="x", padx=16, pady=(8, 12))
+        ttk.Button(current_footer, text="💾 Save Checked Edits", command=self.save_checked_edits, style="Success.TButton").pack(side="right")
 
         # ========== Tab 2: Add New
-        self.tab_add = ttk.Frame(self.nb)
-        self.nb.add(self.tab_add, text="Add New Wells")
+        self.tab_add = ttk.Frame(self.nb, style="Modern.TFrame")
+        self.nb.add(self.tab_add, text="➕ Add New Wells")
 
-        head = ttk.Frame(self.tab_add)
-        head.pack(fill="x", padx=8, pady=6)
-        ttk.Label(head, text="Select rows to insert. Well Name is optional; other fields via dropdown.").pack(side="left")
+        head = ttk.Frame(self.tab_add, style="Modern.TFrame")
+        head.pack(fill="x", padx=16, pady=12)
+        ttk.Label(head, text="📝 Select rows to insert. Well Name is optional; other fields via dropdown.", style="Modern.TLabel").pack(side="left")
 
         self.scroll = XYScrollFrame(self.tab_add)
-        self.scroll.pack(fill="both", expand=True, padx=8, pady=4)
+        self.scroll.pack(fill="both", expand=True, padx=16, pady=8)
         self.scroll.vsb.configure(command=self.scroll.canvas.yview)
         self.scroll.hsb.configure(command=self.scroll.canvas.xview)
 
-        # App footer
-        footer = ttk.Frame(self)
-        footer.pack(fill="x", padx=8, pady=10)
-        self.count_label = ttk.Label(footer, text="Ready")
+        # Modern status bar
+        status_frame = ttk.Frame(self, style="Modern.TFrame")
+        status_frame.pack(fill="x", padx=16, pady=(0, 8))
+        
+        # Status info
+        self.count_label = ttk.Label(status_frame, text="Ready", style="Modern.TLabel", font=('Segoe UI', 9))
         self.count_label.pack(side="left")
-        ttk.Button(footer, text="Update Selected → Access", command=self.do_update).pack(side="right")
+        
+        # Action button
+        ttk.Button(status_frame, text="🚀 Update Selected", command=self.do_update, style="Success.TButton").pack(side="right")
 
         # Data caches
         self.df_current: pd.DataFrame | None = None
@@ -473,7 +641,6 @@ class App(tk.Tk):
         """
         Close the active cell editor (if any).
         commit=False: discard, commit=True: commit current value.
-        Ensures any grab held by the editor is released.
         """
         ed = self._editor
         if not ed:
@@ -482,13 +649,9 @@ class App(tk.Tk):
             if commit:
                 ed._commit()
             else:
-                ed.destroy()   # destroy() releases grab inside CellEditor
+                ed.destroy()
         except Exception:
-            try:
-                if getattr(ed, "top", None):
-                    ed.top.grab_release()
-            except Exception:
-                pass
+            pass
         finally:
             self._editor = None
 
@@ -561,9 +724,10 @@ class App(tk.Tk):
         self._pending_edits.clear()
         self._close_editor(False)
 
-        self.tree.tag_configure("even", background="#ffffff")
-        self.tree.tag_configure("odd",  background="#f7f7f7")
-        self.tree.tag_configure("pending", background="#fff4cc")  # light highlight for pending rows
+        # Modern treeview row styling
+        self.tree.tag_configure("even", background=self.colors['surface'])
+        self.tree.tag_configure("odd",  background=self.colors['surface_alt'])
+        self.tree.tag_configure("pending", background="#fef3c7")  # Modern amber highlight for pending rows
 
         # Split complete vs pending (blank or NaN Well Name)
         mask_pending = (
@@ -625,43 +789,46 @@ class App(tk.Tk):
             child.destroy()
         self.new_widgets.clear()
 
-        table = ttk.Frame(self.scroll.viewPort)
-        table.pack(fill="both", expand=True, padx=8, pady=4)
+        table = ttk.Frame(self.scroll.viewPort, style="Modern.TFrame")
+        table.pack(fill="both", expand=True, padx=16, pady=8)
 
         headers = ["", "GasIDREC", "PressuresIDREC", *ENTRY_FIELDS, *DROPDOWN_FIELDS, "Composite name"]
         col_widths = [36, 150, 150] + [200]*len(ENTRY_FIELDS) + [180]*len(DROPDOWN_FIELDS) + [240]
 
-        # Header row (grid-style)
+        # Modern header row
         for ci, title in enumerate(headers):
             text = "✓" if ci == 0 else title
             hdr = tk.Label(
                 table, text=text, font=("Segoe UI", 9, "bold"),
-                bg="#f3f3f3", bd=1, relief="solid", anchor="center"
+                bg=self.colors['surface_alt'], fg=self.colors['text_primary'], 
+                bd=1, relief="solid", anchor="center"
             )
-            hdr.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0, ipadx=4, ipady=3)
+            hdr.grid(row=0, column=ci, sticky="nsew", padx=0, pady=0, ipadx=8, ipady=6)
             weight = 0 if ci in (0, 1, 2) else 1
             table.grid_columnconfigure(ci, minsize=col_widths[ci], weight=weight, uniform="addcols")
 
         def cell(parent, r, c):
-            box = tk.Frame(parent, bd=1, relief="solid")
+            box = tk.Frame(parent, bd=1, relief="solid", bg=self.colors['surface'])
             box.grid(row=r, column=c, sticky="nsew", padx=0, pady=0)
             return box
 
         for ri, rec in enumerate(self.new_ids, start=1):
             # Select
             var_sel = tk.BooleanVar(value=True)
-            ttk.Checkbutton(cell(table, ri, 0), variable=var_sel, style="Slim.TCheckbutton").pack(anchor="center")
+            ttk.Checkbutton(cell(table, ri, 0), variable=var_sel, style="Modern.TCheckbutton").pack(anchor="center")
 
             # IDs
-            tk.Label(cell(table, ri, 1), text=str(rec.get("GasIDREC") or ""), anchor="w").pack(fill="x", padx=4, pady=2)
-            tk.Label(cell(table, ri, 2), text=str(rec.get("PressuresIDREC") or ""), anchor="w").pack(fill="x", padx=4, pady=2)
+            tk.Label(cell(table, ri, 1), text=str(rec.get("GasIDREC") or ""), anchor="w", 
+                    bg=self.colors['surface'], fg=self.colors['text_primary'], font=('Segoe UI', 9)).pack(fill="x", padx=6, pady=4)
+            tk.Label(cell(table, ri, 2), text=str(rec.get("PressuresIDREC") or ""), anchor="w",
+                    bg=self.colors['surface'], fg=self.colors['text_primary'], font=('Segoe UI', 9)).pack(fill="x", padx=6, pady=4)
 
             # Entries
             entry_vars = {}
             col_index = 3
             for col in ENTRY_FIELDS:
                 v = tk.StringVar(value="")
-                ttk.Entry(cell(table, ri, col_index), textvariable=v).pack(fill="x", expand=True, padx=4, pady=2)
+                ttk.Entry(cell(table, ri, col_index), textvariable=v, style="Modern.TEntry").pack(fill="x", expand=True, padx=6, pady=4)
                 entry_vars[col] = v
                 col_index += 1
 
@@ -673,14 +840,15 @@ class App(tk.Tk):
                     cell(table, ri, col_index),
                     textvariable=v,
                     values=self.dropdown_options.get(col, []),
-                    state="readonly"
-                ).pack(fill="x", expand=True, padx=4, pady=2)
+                    state="readonly",
+                    style="Modern.TCombobox"
+                ).pack(fill="x", expand=True, padx=6, pady=4)
                 dropdown_vars[col] = v
                 col_index += 1
 
             # Composite
             comp_var = tk.StringVar(value="")
-            ttk.Label(cell(table, ri, col_index), textvariable=comp_var).pack(fill="x", expand=True, padx=4, pady=2)
+            ttk.Label(cell(table, ri, col_index), textvariable=comp_var, style="Modern.TLabel").pack(fill="x", expand=True, padx=6, pady=4)
 
             # ---- Per-row callback with captured defaults (fixes late-binding bug) ----
             def _sync(*_,
@@ -717,29 +885,97 @@ class App(tk.Tk):
 
     def on_tree_click(self, event):
         """
-        Click in column #1 toggles checkbox. For any other region (headers, separators,
-        scrollbar, empty space), we close any editor and let Tk handle the default behavior.
+        Handle single clicks for both checkbox toggling and cell editing.
+        - Column #1: Toggle checkbox
+        - Other editable columns: Start editing (if row is checked)
+        - Non-editable areas: Close editor and allow default behavior
         """
         region = self.tree.identify("region", event.x, event.y)   # 'cell', 'heading', 'separator', 'tree', 'nothing'
         column = self.tree.identify_column(event.x)               # '#1' = Select
         item   = self.tree.identify_row(event.y)
 
-        # Toggle only when clicking the Select column on a valid row
+        # Handle checkbox column
         if region == "cell" and column == "#1" and item:
             self.tree.focus(item)
             self._toggle_item_checkbox(item)
             return "break"  # we handled it
 
-        # For everything else, just close the editor and allow default behavior
+        # Handle editable cell clicks
+        if region == "cell" and item and column and column != "#1":
+            # Check if this is an editable column
+            try:
+                col_index = int(column.replace("#", "")) - 1
+                if 0 <= col_index < len(self.columns_present):
+                    col_name = self.columns_present[col_index]
+                    
+                    # Check if column is editable and row is checked
+                    if (col_name in EDITABLE_FIELDS and 
+                        item in self._checked and 
+                        item not in getattr(self, "_pending_row_ids", set())):
+                        
+                        # Start editing immediately
+                        self._start_cell_edit(item, col_name, event.x, event.y)
+                        return "break"
+            except (ValueError, IndexError):
+                pass
+
+        # For everything else, close editor and allow default behavior
         if self._editor:
             self._close_editor(False)
         # NOTE: intentionally no 'return "break"' here
 
+    def _start_cell_edit(self, item, col_name, x, y):
+        """
+        Start editing a cell. This is called from both single-click and double-click handlers.
+        """
+        # Get column ID for bbox calculation
+        try:
+            col_index = self.columns_present.index(col_name)
+            col_id = f"#{col_index + 1}"
+        except (ValueError, IndexError):
+            return
+
+        # Cell rectangle and current value
+        bbox = self.tree.bbox(item, col_id)
+        if not bbox:
+            return
+        
+        current_val = self.tree.set(item, col_name)
+        options = self.dropdown_options.get(col_name) if col_name in self.dropdown_options else None
+
+        # Close any previous editor
+        self._close_editor(False)
+
+        def _commit(value: str):
+            # record change in grid
+            self.tree.set(item, col_name, value)
+            self._pending_edits.setdefault(item, {})[col_name] = (value if value != "" else None)
+            # keep Composite name in sync
+            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
+                comp = compose_name(
+                    self.tree.set(item, "Well Name"),
+                    self.tree.set(item, "Layer Producer"),
+                    self.tree.set(item, "Completions Technology"),
+                )
+                if "Composite name" in self.columns_present:
+                    self.tree.set(item, "Composite name", comp or "")
+                self._pending_edits.setdefault(item, {})["Composite name"] = comp
+
+        # Create the detached editor window over the cell
+        self._editor = CellEditor(
+            app=self,
+            tree=self.tree,
+            item=item,
+            col_name=col_name,
+            bbox=bbox,
+            options=options,            # None => Entry, list => Combobox
+            current_val=current_val,
+            on_commit=_commit,
+        )
+
     def on_tree_double_click(self, event):
         """
-        Start a CellEditor over the double-clicked cell if it is editable.
-        - You must check (✓) the row first.
-        - Pending rows (blank Well Name, shown at bottom) are not editable here.
+        Double-click also starts editing (for users who prefer double-click).
         """
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
@@ -777,43 +1013,30 @@ class App(tk.Tk):
         if col_name not in EDITABLE_FIELDS:
             return
 
-        # Cell rectangle and current value
-        bbox = self.tree.bbox(item, col_id)
-        if not bbox:
-            return
-        x, y, w, h = bbox
-        current_val = self.tree.set(item, col_name)
-        options = self.dropdown_options.get(col_name) if col_name in self.dropdown_options else None
+        # Start editing
+        self._start_cell_edit(item, col_name, event.x, event.y)
 
-        # Close any previous editor
+    def on_app_click(self, event):
+        """
+        Handle clicks on the main app window to close editor when clicking outside.
+        """
+        # Only close editor if we're not clicking on the tree or editor
+        if self._editor and hasattr(self._editor, 'top'):
+            try:
+                # Check if click is on the editor
+                editor_x = self._editor.top.winfo_x()
+                editor_y = self._editor.top.winfo_y()
+                editor_w = self._editor.top.winfo_width()
+                editor_h = self._editor.top.winfo_height()
+                
+                if (editor_x <= event.x <= editor_x + editor_w and 
+                    editor_y <= event.y <= editor_y + editor_h):
+                    return  # Don't close editor if clicking on it
+            except Exception:
+                pass
+        
+        # Close editor if clicking elsewhere
         self._close_editor(False)
-
-        def _commit(value: str):
-            # record change in grid
-            self.tree.set(item, col_name, value)
-            self._pending_edits.setdefault(item, {})[col_name] = (value if value != "" else None)
-            # keep Composite name in sync
-            if col_name in ("Well Name", "Layer Producer", "Completions Technology"):
-                comp = compose_name(
-                    self.tree.set(item, "Well Name"),
-                    self.tree.set(item, "Layer Producer"),
-                    self.tree.set(item, "Completions Technology"),
-                )
-                if "Composite name" in self.columns_present:
-                    self.tree.set(item, "Composite name", comp or "")
-                self._pending_edits.setdefault(item, {})["Composite name"] = comp
-
-        # Create the detached editor window over the cell
-        self._editor = CellEditor(
-            app=self,
-            tree=self.tree,
-            item=item,
-            col_name=col_name,
-            bbox=(x, y, w, h),
-            options=options,            # None => Entry, list => Combobox
-            current_val=current_val,
-            on_commit=_commit,
-        )
 
     def _toggle_item_checkbox(self, item: str):
         """Shared logic to toggle the ✓ cell, including staging pending rows."""
@@ -868,12 +1091,34 @@ class App(tk.Tk):
 
     def on_mousewheel(self, event):
         """
-        Predictable scrolling that also closes any inline editor:
+        Improved scrolling that works even when editor is open:
         - Vertical by default
         - Hold Shift for horizontal
+        - Closes editor only when scrolling outside the editor area
         Works on Windows/macOS (<MouseWheel>) and Linux (<Button-4/5>).
         """
-        # Always close the editor when scrolling
+        # Check if we're scrolling over the editor
+        if self._editor and hasattr(self._editor, 'top'):
+            try:
+                # Get editor window position and size
+                editor_x = self._editor.top.winfo_x()
+                editor_y = self._editor.top.winfo_y()
+                editor_w = self._editor.top.winfo_width()
+                editor_h = self._editor.top.winfo_height()
+                
+                # Get mouse position relative to root window
+                mouse_x = self.winfo_pointerx() - self.winfo_rootx()
+                mouse_y = self.winfo_pointery() - self.winfo_rooty()
+                
+                # Check if mouse is over the editor
+                if (editor_x <= mouse_x <= editor_x + editor_w and 
+                    editor_y <= mouse_y <= editor_y + editor_h):
+                    # Don't close editor if scrolling over it
+                    return "break"
+            except Exception:
+                pass
+        
+        # Close editor when scrolling outside of it
         self._close_editor(False)
 
         # Shift pressed?
