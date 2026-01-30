@@ -27,6 +27,7 @@ from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 import pyodbc
 from pathlib import Path
+import threading
 
 # ============================================================
 # CONFIG
@@ -81,13 +82,23 @@ ENABLE_SPACE_TOGGLE = True
 def connect_access(db_path: str):
     """
     Create a pyodbc connection to a local Access database.
+    Raises FileNotFoundError if path doesn't exist.
     """
+    p = Path(db_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+    if not p.is_file():
+        raise ValueError(f"Path is not a file: {db_path}")
+    
     conn_str = (
         r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};"
         rf"DBQ={db_path};"
         r"UID=Admin;PWD=;"
     )
-    return pyodbc.connect(conn_str)
+    try:
+        return pyodbc.connect(conn_str)
+    except pyodbc.Error as e:
+        raise ConnectionError(f"Failed to connect to database: {e}")
 
 
 def load_access_table(db_path: str, table_name: str) -> pd.DataFrame:
@@ -104,24 +115,27 @@ def load_access_table(db_path: str, table_name: str) -> pd.DataFrame:
     except Exception:
         pass
 
-    with connect_access(db_path) as conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(f"SELECT COUNT(*) FROM [{table_name}]")
-            total = cur.fetchone()[0]
-            log(f"[DB] Row count in Access right now: {total}")
-        except Exception:
-            pass
+    try:
+        with connect_access(db_path) as conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) FROM [{table_name}]")
+                total = cur.fetchone()[0]
+                log(f"[DB] Row count in Access right now: {total}")
+            except Exception as e:
+                log(f"[DB] Could not get row count: {e}")
 
-        df = pd.read_sql(f"SELECT * FROM [{table_name}] ORDER BY ID ASC", conn)
+            df = pd.read_sql(f"SELECT * FROM [{table_name}] ORDER BY ID ASC", conn)
 
-        try:
-            tail = df[["ID", "Well Name"]].tail(5)
-            log("[DB] Tail IDs just loaded:\n" + tail.to_string(index=False))
-        except Exception:
-            pass
+            try:
+                tail = df[["ID", "Well Name"]].tail(5)
+                log("[DB] Tail IDs just loaded:\n" + tail.to_string(index=False))
+            except Exception:
+                pass
 
-    return df
+        return df
+    except Exception as e:
+        raise RuntimeError(f"Failed to load table '{table_name}': {e}")
 
 
 def get_unique_options(df: pd.DataFrame) -> dict:
@@ -150,6 +164,9 @@ def insert_records(conn, table_name: str, rows: list[dict]):
     """
     Batch insert (ID omitted). Each row is a dict mapping column -> value.
     """
+    if not rows:
+        return
+    
     insert_cols = [c for c in TABLE_COLUMNS if c != AUTONUMBER_FIELD]
     placeholders = ", ".join(["?"] * len(insert_cols))
     col_list = ", ".join([f"[{c}]" for c in insert_cols])
@@ -359,6 +376,10 @@ class App(tk.Tk):
             except:
                 pass
 
+        # Operation state
+        self._is_loading = False
+        self._operation_in_progress = False
+
         # --- Modern Toolbar
         toolbar = ttk.Frame(self, style="Modern.TFrame")
         toolbar.pack(fill="x", padx=16, pady=12)
@@ -376,7 +397,8 @@ class App(tk.Tk):
         
         ttk.Label(db_section, text="Database:", style="Modern.TLabel").pack(side="left")
         ttk.Entry(db_section, textvariable=self.db_path_var, width=60, style="Modern.TEntry").pack(side="left", padx=(8, 4))
-        ttk.Button(db_section, text="Browse", command=self.pick_db, style="Modern.TButton").pack(side="left", padx=4)
+        self.btn_browse = ttk.Button(db_section, text="Browse", command=self.pick_db, style="Modern.TButton")
+        self.btn_browse.pack(side="left", padx=4)
         
         # Table section
         table_section = ttk.Frame(toolbar_content, style="Modern.TFrame")
@@ -384,7 +406,8 @@ class App(tk.Tk):
         
         ttk.Label(table_section, text="Table:", style="Modern.TLabel").pack(side="left")
         ttk.Entry(table_section, textvariable=self.table_var, width=20, style="Modern.TEntry").pack(side="left", padx=(8, 4))
-        ttk.Button(table_section, text="Reload", command=self.reload_all, style="Success.TButton").pack(side="left")
+        self.btn_reload = ttk.Button(table_section, text="Reload", command=self.reload_all, style="Success.TButton")
+        self.btn_reload.pack(side="left")
 
         # --- Modern Notebook with subtle border
         notebook_frame = ttk.Frame(self, style="Modern.TFrame")
@@ -500,6 +523,17 @@ class App(tk.Tk):
             background=[("active", "#059669"), ("pressed", "#059669")],
         )
 
+        # Disabled button style
+        style.configure(
+            "Disabled.TButton",
+            background=self.colors['text_muted'],
+            foreground=self.colors['surface'],
+            borderwidth=0,
+            focuscolor="none",
+            font=('Segoe UI', 9, 'bold'),
+            padding=(16, 8)
+        )
+
         # Modern entry and combobox
         style.configure(
             "Modern.TEntry",
@@ -570,7 +604,7 @@ class App(tk.Tk):
         tree_wrap.columnconfigure(0, weight=1)
 
         # Bindings for editor lifecycle and interactions
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._close_editor(False))   # switching tabs
+        self.nb.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         self.tree.bind("<Unmap>",                lambda e: self._close_editor(False)) # hiding tree
         self.bind("<Unmap>",                     lambda e: self._close_editor(False)) # app minimized/unmapped
         self.tree.bind("<Configure>",            lambda e: self._close_editor(False), add="+")
@@ -592,20 +626,21 @@ class App(tk.Tk):
         current_footer = ttk.Frame(self.tab_current, style="Modern.TFrame")
         current_footer.pack(fill="x", padx=16, pady=(8, 12))
 
-        ttk.Button(
+        self.btn_export = ttk.Button(
             current_footer,
             text="📤 Export Current Wells",
             command=self.export_current_wells,
             style="Modern.TButton"
-        ).pack(side="left")
+        )
+        self.btn_export.pack(side="left")
 
-        ttk.Button(
+        self.btn_save_edits = ttk.Button(
             current_footer,
             text="💾 Save Checked Edits",
             command=self.save_checked_edits,
             style="Success.TButton"
-        ).pack(side="right")
-
+        )
+        self.btn_save_edits.pack(side="right")
 
         # ========== Tab 2: Add New
         self.tab_add = ttk.Frame(self.nb, style="Modern.TFrame")
@@ -629,7 +664,13 @@ class App(tk.Tk):
         self.count_label.pack(side="left")
         
         # Action button
-        ttk.Button(status_frame, text="🚀 Update Selected", command=self.do_update, style="Success.TButton").pack(side="right")
+        self.btn_update_selected = ttk.Button(
+            status_frame, 
+            text="🚀 Update Selected", 
+            command=self.do_update, 
+            style="Success.TButton"
+        )
+        self.btn_update_selected.pack(side="right")
 
         # Data caches
         self.df_current: pd.DataFrame | None = None
@@ -642,12 +683,58 @@ class App(tk.Tk):
         # Initial load
         self.reload_all()
 
+    # ---------------- Button state management ----------------
+
+    def _set_loading_state(self, loading: bool):
+        """Enable/disable buttons during operations."""
+        self._is_loading = loading
+        state = "disabled" if loading else "normal"
+        
+        self.btn_reload.config(state=state)
+        self.btn_browse.config(state=state)
+        self.btn_export.config(state=state)
+        self.btn_save_edits.config(state=state)
+        self.btn_update_selected.config(state=state)
+
+    def _update_button_states(self):
+        """Update button states based on current data state."""
+        has_data = self.df_current is not None and len(self.df_current) > 0
+        has_checked = len(self._checked) > 0
+        has_pending_edits = any(
+            iid in self._checked and edits 
+            for iid, edits in self._pending_edits.items()
+        )
+        has_staged = len(self.new_ids) > 0
+        has_selected_staged = any(w["selected"].get() for w in self.new_widgets)
+
+        # Export: enabled if we have data
+        self.btn_export.config(state="normal" if has_data and not self._is_loading else "disabled")
+        
+        # Save edits: enabled if we have checked rows with pending edits
+        self.btn_save_edits.config(state="normal" if has_pending_edits and not self._is_loading else "disabled")
+        
+        # Update selected: enabled if we have staged rows selected
+        self.btn_update_selected.config(state="normal" if has_selected_staged and not self._is_loading else "disabled")
+
     # ---------------- Toolbar actions ----------------
 
     def pick_db(self):
-        path = filedialog.askopenfilename(filetypes=[("Access DB", "*.accdb;*.mdb"), ("All", "*.*")])
+        """Browse for database file."""
+        if self._is_loading:
+            return
+        path = filedialog.askopenfilename(
+            title="Select Access Database",
+            filetypes=[("Access DB", "*.accdb;*.mdb"), ("All", "*.*")]
+        )
         if path:
             self.db_path_var.set(path)
+            # Auto-reload after selecting new database
+            self.after(100, self.reload_all)
+
+    def on_tab_changed(self, event=None):
+        """Handle tab changes - close editor and update button states."""
+        self._close_editor(False)
+        self._update_button_states()
 
     # ---------------- Editor lifecycle ----------------
 
@@ -678,10 +765,40 @@ class App(tk.Tk):
         - pending rows (blank Well Name) at the bottom, highlighted.
         Rebuild Add New using ONLY self.new_ids (staged by the user).
         """
+        if self._is_loading:
+            return
+
+        # Validate inputs
+        db_path = self.db_path_var.get().strip()
+        table_name = self.table_var.get().strip()
+        
+        if not db_path:
+            messagebox.showerror("Invalid Input", "Please specify a database path.")
+            return
+        if not table_name:
+            messagebox.showerror("Invalid Input", "Please specify a table name.")
+            return
+
+        self._set_loading_state(True)
+        self.count_label.config(text="Loading data...")
+        self.update()
+
         try:
-            self.df_current = load_access_table(self.db_path_var.get(), self.table_var.get())
+            self.df_current = load_access_table(db_path, table_name)
+        except FileNotFoundError as e:
+            messagebox.showerror("File Not Found", f"Database file not found:\n{e}")
+            self._set_loading_state(False)
+            self.count_label.config(text="Error: Database not found")
+            return
+        except ConnectionError as e:
+            messagebox.showerror("Connection Error", f"Could not connect to database:\n{e}\n\nPlease ensure:\n- The database file is not locked by another application\n- You have read/write permissions")
+            self._set_loading_state(False)
+            self.count_label.config(text="Error: Connection failed")
+            return
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load Access table:\n{e}")
+            self._set_loading_state(False)
+            self.count_label.config(text=f"Error: {str(e)[:50]}")
             return
 
         # Columns present in DB (keep order)
@@ -743,15 +860,6 @@ class App(tk.Tk):
         self.tree.tag_configure("odd",  background=self.colors['surface_alt'])
         self.tree.tag_configure("pending", background="#fef3c7")  # Modern amber highlight for pending rows
 
-        # Split complete vs pending (blank or NaN Well Name)
-        '''
-        mask_pending = (
-            self.df_current["Well Name"].isnull()
-            | (self.df_current["Well Name"].astype(str).str.strip() == "")
-        )
-        df_complete = self.df_current.loc[~mask_pending]
-        df_pending  = self.df_current.loc[mask_pending]
-        '''
         # A row is considered "new" if:
         # - GasIDREC, PressuresIDREC, and Well Name exist
         # - and all the other key fields are NULL/blank
@@ -777,9 +885,6 @@ class App(tk.Tk):
         df_pending = df.loc[mask_pending]
         df_complete = df.loc[~mask_pending]
 
-        
-        
-        
         # Track which Treeview items are pending so we can move them when checked
         self._pending_row_ids = set()
         self._pending_iid_to_pair = {}
@@ -818,8 +923,11 @@ class App(tk.Tk):
         pending_ct = len(df_pending)
         staged_ct  = len(self.new_ids)
         self.count_label.config(
-            text=f"Loaded {len(self.df_current)} rows • {pending_ct} pending (bottom) • Staged for Add New: {staged_ct}"
+            text=f"✓ Loaded {len(self.df_current)} rows • {pending_ct} pending (bottom) • {staged_ct} staged for Add New"
         )
+
+        self._set_loading_state(False)
+        self._update_button_states()
 
     # ---------------- Add New tab ----------------
 
@@ -831,6 +939,20 @@ class App(tk.Tk):
         for child in list(self.scroll.viewPort.children.values()):
             child.destroy()
         self.new_widgets.clear()
+
+        if not self.new_ids:
+            # Show empty state
+            empty_frame = ttk.Frame(self.scroll.viewPort, style="Modern.TFrame")
+            empty_frame.pack(fill="both", expand=True, pady=50)
+            ttk.Label(
+                empty_frame, 
+                text="No rows staged for adding.\n\nCheck pending rows in 'Current Wells' tab to stage them here.",
+                style="Modern.TLabel",
+                font=('Segoe UI', 10),
+                justify="center"
+            ).pack()
+            self._update_button_states()
+            return
 
         table = ttk.Frame(self.scroll.viewPort, style="Modern.TFrame")
         table.pack(fill="both", expand=True, padx=16, pady=8)
@@ -858,7 +980,8 @@ class App(tk.Tk):
         for ri, rec in enumerate(self.new_ids, start=1):
             # Select
             var_sel = tk.BooleanVar(value=True)
-            ttk.Checkbutton(cell(table, ri, 0), variable=var_sel, style="Modern.TCheckbutton").pack(anchor="center")
+            cb = ttk.Checkbutton(cell(table, ri, 0), variable=var_sel, style="Modern.TCheckbutton", command=self._update_button_states)
+            cb.pack(anchor="center")
 
             # IDs
             tk.Label(cell(table, ri, 1), text=str(rec.get("GasIDREC") or ""), anchor="w", 
@@ -924,6 +1047,8 @@ class App(tk.Tk):
                 "dropdowns": dropdown_vars,
                 "comp_var": comp_var,
             })
+
+        self._update_button_states()
 
     # ---------------- Current Wells interactions ----------------
 
@@ -1004,6 +1129,7 @@ class App(tk.Tk):
                 if "Composite name" in self.columns_present:
                     self.tree.set(item, "Composite name", comp or "")
                 self._pending_edits.setdefault(item, {})["Composite name"] = comp
+            self._update_button_states()
 
         # Create the detached editor window over the cell
         self._editor = CellEditor(
@@ -1102,7 +1228,7 @@ class App(tk.Tk):
                     self.new_ids.append({
                         "GasIDREC": pair[0],
                         "PressuresIDREC": pair[1],
-                        "Well Name": well_name,   # <-- NEW
+                        "Well Name": well_name,
                     })
                     self.build_add_rows()
 
@@ -1114,6 +1240,9 @@ class App(tk.Tk):
                 except Exception:
                     pass
                 self.nb.select(self.tab_add)
+                self.count_label.config(
+                    text=f"✓ Moved {len(self.new_ids)} row(s) to Add New tab"
+                )
             return
 
         # Complete rows: maintain the checked set
@@ -1121,6 +1250,8 @@ class App(tk.Tk):
             self._checked.add(item)
         else:
             self._checked.discard(item)
+        
+        self._update_button_states()
 
     def on_space_toggle(self, event):
         """
@@ -1201,60 +1332,95 @@ class App(tk.Tk):
         """
         Apply pending edits for checked rows back into Access.
         """
+        if self._is_loading or self._operation_in_progress:
+            return
+
         if not self._checked:
-            messagebox.showinfo("No rows checked", "Check the rows you want to save, then try again.")
+            messagebox.showinfo("No Selection", "Please check the rows you want to save, then try again.")
             return
 
         to_update = {iid: edits for iid, edits in self._pending_edits.items() if iid in self._checked and edits}
         if not to_update:
-            messagebox.showinfo("Nothing to save", "No pending edits on checked rows.")
+            messagebox.showinfo("Nothing to Save", "No pending edits found on checked rows.")
             return
+
+        # Confirmation
+        count = len(to_update)
+        if not messagebox.askyesno(
+            "Confirm Save",
+            f"Save changes to {count} row(s)?\n\nThis will update the database."
+        ):
+            return
+
+        self._operation_in_progress = True
+        self._set_loading_state(True)
+        self.count_label.config(text=f"Saving {count} row(s)...")
+        self.update()
 
         db_path = self.db_path_var.get()
         table = self.table_var.get()
         updated = 0
         failed = 0
+        errors = []
 
-        with connect_access(db_path) as conn:
-            for iid, payload in to_update.items():
-                # Find Access row ID
-                try:
-                    rec_id = int(iid)
-                except Exception:
-                    row_vals = {c: self.tree.set(iid, c) for c in self.columns_present if c != "Select"}
-                    rec_id = find_existing_id(conn, table, row_vals.get("GasIDREC"), row_vals.get("PressuresIDREC"))
+        try:
+            with connect_access(db_path) as conn:
+                for iid, payload in to_update.items():
+                    # Find Access row ID
+                    try:
+                        rec_id = int(iid)
+                    except Exception:
+                        row_vals = {c: self.tree.set(iid, c) for c in self.columns_present if c != "Select"}
+                        rec_id = find_existing_id(conn, table, row_vals.get("GasIDREC"), row_vals.get("PressuresIDREC"))
 
-                if not rec_id:
-                    failed += 1
-                    continue
+                    if not rec_id:
+                        failed += 1
+                        errors.append(f"Row {iid}: Record not found")
+                        continue
 
-                # Only update editable columns (and Composite name if available)
-                safe_payload = {k: v for k, v in payload.items() if k in EDITABLE_FIELDS}
+                    # Only update editable columns (and Composite name if available)
+                    safe_payload = {k: v for k, v in payload.items() if k in EDITABLE_FIELDS}
 
-                wn = payload.get("Well Name", self.tree.set(iid, "Well Name"))
-                lp = payload.get("Layer Producer", self.tree.set(iid, "Layer Producer"))
-                ct = payload.get("Completions Technology", self.tree.set(iid, "Completions Technology"))
-                comp = compose_name(wn, lp, ct)
-                if comp is not None:
-                    safe_payload["Composite name"] = comp
-                    if "Composite name" in self.columns_present:
-                        self.tree.set(iid, "Composite name", comp)
+                    wn = payload.get("Well Name", self.tree.set(iid, "Well Name"))
+                    lp = payload.get("Layer Producer", self.tree.set(iid, "Layer Producer"))
+                    ct = payload.get("Completions Technology", self.tree.set(iid, "Completions Technology"))
+                    comp = compose_name(wn, lp, ct)
+                    if comp is not None:
+                        safe_payload["Composite name"] = comp
+                        if "Composite name" in self.columns_present:
+                            self.tree.set(iid, "Composite name", comp)
 
-                try:
-                    update_record(conn, table, rec_id, safe_payload)
-                    updated += 1
-                except Exception as e:
-                    failed += 1
-                    messagebox.showerror("Update Error", f"Failed to update ID={rec_id}:\n{e}")
-                    return
-            conn.commit()
+                    try:
+                        update_record(conn, table, rec_id, safe_payload)
+                        updated += 1
+                    except Exception as e:
+                        failed += 1
+                        errors.append(f"Row {iid}: {str(e)}")
 
-        # Clear pending edits for saved rows
-        for iid in list(self._checked):
-            self._pending_edits.pop(iid, None)
+                conn.commit()
 
-        messagebox.showinfo("Done", f"Updated: {updated}\nFailed: {failed}")
-        self.reload_all()
+            # Clear pending edits for saved rows
+            for iid in list(self._checked):
+                self._pending_edits.pop(iid, None)
+
+            if failed > 0:
+                error_msg = "\n".join(errors[:5])  # Show first 5 errors
+                if len(errors) > 5:
+                    error_msg += f"\n... and {len(errors) - 5} more"
+                messagebox.showwarning(
+                    "Save Completed with Errors",
+                    f"Updated: {updated}\nFailed: {failed}\n\nErrors:\n{error_msg}"
+                )
+            else:
+                messagebox.showinfo("Save Complete", f"Successfully updated {updated} row(s).")
+            
+            self.reload_all()
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save changes:\n{e}")
+        finally:
+            self._operation_in_progress = False
+            self._set_loading_state(False)
+            self._update_button_states()
 
     
     # ---------------- Export Current Wells --------------------------
@@ -1264,6 +1430,9 @@ class App(tk.Tk):
         Export the Current Wells treeview exactly as displayed (order + current cell values).
         Includes unsaved edits that are visible in the grid.
         """
+        if self._is_loading or self.df_current is None:
+            return
+
         # Close any active editor so the cell value is committed into the tree first
         self._close_editor(commit=True)
 
@@ -1292,15 +1461,32 @@ class App(tk.Tk):
                 row[col] = self.tree.set(iid, col)
             rows.append(row)
 
+        if not rows:
+            messagebox.showinfo("No Data", "No data to export.")
+            return
+
         df = pd.DataFrame(rows, columns=export_cols)
 
         try:
             if path.lower().endswith(".csv"):
                 df.to_csv(path, index=False)
             else:
-                # Excel export
-                df.to_excel(path, index=False)
-            messagebox.showinfo("Export Complete", f"Exported {len(df)} rows to:\n{path}")
+                # Excel export - check for openpyxl
+                try:
+                    import openpyxl
+                except ImportError:
+                    messagebox.showerror(
+                        "Missing Dependency",
+                        "Excel export requires 'openpyxl'.\n\n"
+                        "Please install it:\npip install openpyxl\n\n"
+                        "Or export as CSV instead."
+                    )
+                    return
+                df.to_excel(path, index=False, engine='openpyxl')
+            
+            messagebox.showinfo("Export Complete", f"Successfully exported {len(df)} row(s) to:\n{path}")
+        except PermissionError:
+            messagebox.showerror("Export Failed", f"Permission denied.\n\nPlease ensure the file is not open in another application:\n{path}")
         except Exception as e:
             messagebox.showerror("Export Failed", f"Could not export:\n{e}")
 
@@ -1312,6 +1498,9 @@ class App(tk.Tk):
         Apply updates/inserts for rows staged on the Add New tab.
         After success, remove processed rows from staging so the list stays clean.
         """
+        if self._is_loading or self._operation_in_progress:
+            return
+
         rows = []
         staged_pairs_selected = []  # to track which staged rows were chosen this time
         for item in self.new_widgets:
@@ -1330,8 +1519,20 @@ class App(tk.Tk):
             staged_pairs_selected.append((str(item["gas"] or ""), str(item["pres"] or "")))
 
         if not rows:
-            messagebox.showinfo("Nothing selected", "No rows were checked. Tick the boxes to select rows to apply.")
+            messagebox.showinfo("Nothing Selected", "Please check the rows you want to add/update, then try again.")
             return
+
+        # Confirmation
+        if not messagebox.askyesno(
+            "Confirm Update",
+            f"Process {len(rows)} row(s)?\n\nThis will insert new records or update existing ones in the database."
+        ):
+            return
+
+        self._operation_in_progress = True
+        self._set_loading_state(True)
+        self.count_label.config(text=f"Processing {len(rows)} row(s)...")
+        self.update()
 
         db_path = self.db_path_var.get()
         table = self.table_var.get()
@@ -1340,59 +1541,80 @@ class App(tk.Tk):
         inserted = 0
         skipped = 0
         processed_ok_pairs: list[tuple] = []
+        errors = []
 
-        with connect_access(db_path) as conn:
-            to_insert = []
-            for r in rows:
-                wn = r.get("Well Name")
-                if wn:
-                    cur = conn.cursor()
-                    cur.execute(f"SELECT COUNT(1) FROM [{table}] WHERE [Well Name] = ?", (wn,))
-                    if cur.fetchone()[0] > 0:
-                        if not messagebox.askyesno("Duplicate Well Name", f"'{wn}' already exists. Continue?"):
-                            skipped += 1
-                            continue
+        try:
+            with connect_access(db_path) as conn:
+                to_insert = []
+                for r in rows:
+                    wn = r.get("Well Name")
+                    if wn:
+                        cur = conn.cursor()
+                        cur.execute(f"SELECT COUNT(1) FROM [{table}] WHERE [Well Name] = ?", (wn,))
+                        if cur.fetchone()[0] > 0:
+                            if not messagebox.askyesno("Duplicate Well Name", f"'{wn}' already exists. Continue with this row?"):
+                                skipped += 1
+                                continue
 
-                rec_id = find_existing_id(conn, table, r.get("GasIDREC"), r.get("PressuresIDREC"))
-                pair = (str(r.get("GasIDREC") or ""), str(r.get("PressuresIDREC") or ""))
-                if rec_id:
+                    rec_id = find_existing_id(conn, table, r.get("GasIDREC"), r.get("PressuresIDREC"))
+                    pair = (str(r.get("GasIDREC") or ""), str(r.get("PressuresIDREC") or ""))
+                    if rec_id:
+                        try:
+                            update_record(conn, table, rec_id, r)
+                            updated += 1
+                            processed_ok_pairs.append(pair)
+                        except Exception as e:
+                            errors.append(f"Update failed for {pair}: {e}")
+                            # Continue with other rows
+                    else:
+                        to_insert.append((r, pair))
+
+                if to_insert:
                     try:
-                        update_record(conn, table, rec_id, r)
-                        updated += 1
-                        processed_ok_pairs.append(pair)
+                        insert_records(conn, table, [r for r, _pair in to_insert])
+                        inserted += len(to_insert)
+                        processed_ok_pairs.extend([pair for _r, pair in to_insert])
                     except Exception as e:
-                        messagebox.showerror("Update Error", f"Failed to update ID={rec_id}:\n{e}")
-                        return
-                else:
-                    to_insert.append((r, pair))
+                        errors.append(f"Insert failed: {e}")
+                        # Don't return, show errors at end
+                conn.commit()
 
-            if to_insert:
-                try:
-                    insert_records(conn, table, [r for r, _pair in to_insert])
-                    inserted += len(to_insert)
-                    processed_ok_pairs.extend([pair for _r, pair in to_insert])
-                except Exception as e:
-                    messagebox.showerror("Insert Error", f"Failed to insert records:\n{e}")
-                    return
-            conn.commit()
+            # Remove successfully processed pairs from staging (self.new_ids / self._staged_pairs)
+            if processed_ok_pairs:
+                keep = []
+                processed_set = set(processed_ok_pairs)
+                for rec in self.new_ids:
+                    pair = (str(rec.get("GasIDREC") or ""), str(rec.get("PressuresIDREC") or ""))
+                    if pair not in processed_set:
+                        keep.append(rec)
+                    else:
+                        # also drop from the staged set
+                        self._staged_pairs.discard(pair)
+                self.new_ids = keep
 
-        messagebox.showinfo("Done", f"Updated: {updated}\nInserted: {inserted}\nSkipped: {skipped}")
+            # Show results
+            if errors:
+                error_msg = "\n".join(errors[:5])
+                if len(errors) > 5:
+                    error_msg += f"\n... and {len(errors) - 5} more"
+                messagebox.showwarning(
+                    "Update Completed with Errors",
+                    f"Updated: {updated}\nInserted: {inserted}\nSkipped: {skipped}\n\nErrors:\n{error_msg}"
+                )
+            else:
+                messagebox.showinfo(
+                    "Update Complete",
+                    f"Successfully processed:\n• Updated: {updated}\n• Inserted: {inserted}\n• Skipped: {skipped}"
+                )
 
-        # Remove successfully processed pairs from staging (self.new_ids / self._staged_pairs)
-        if processed_ok_pairs:
-            keep = []
-            processed_set = set(processed_ok_pairs)
-            for rec in self.new_ids:
-                pair = (str(rec.get("GasIDREC") or ""), str(rec.get("PressuresIDREC") or ""))
-                if pair not in processed_set:
-                    keep.append(rec)
-                else:
-                    # also drop from the staged set
-                    self._staged_pairs.discard(pair)
-            self.new_ids = keep
-
-        # Rebuild both tabs
-        self.reload_all()
+            # Rebuild both tabs
+            self.reload_all()
+        except Exception as e:
+            messagebox.showerror("Update Error", f"Failed to process updates:\n{e}")
+        finally:
+            self._operation_in_progress = False
+            self._set_loading_state(False)
+            self._update_button_states()
 
 
 if __name__ == "__main__":
